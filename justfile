@@ -5,6 +5,7 @@ test:
     cargo nextest run --locked --status-level fail --final-status-level fail --failure-output final --success-output never
     python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_hermes_integration_asset scripts.test_package_windows_conpty scripts.test_preview scripts.test_unix_installer scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty
     just ui-hot-path-architecture-test
+    just agent-context-check
     just integration-assets-test
     just plugin-marketplace-test
 
@@ -15,6 +16,11 @@ test-one filter:
 # Enforce deterministic UI hot-path architecture boundaries
 ui-hot-path-architecture-test:
     python3 -m unittest scripts.test_ui_hot_path_architecture
+
+# Validate the agent-facing instruction graph and evidence contracts
+agent-context-check:
+    python3 -m unittest scripts.test_agent_context_check
+    python3 scripts/agent_context_check.py
 
 # Run fast local lint checks
 [unix]
@@ -32,6 +38,7 @@ lint:
 ci filter='all()': lint
     cargo nextest run --locked -E "{{filter}}" --status-level fail --final-status-level slow --failure-output final --success-output never
     just ui-hot-path-architecture-test
+    just agent-context-check
     just integration-assets-test
     just plugin-marketplace-test
 
