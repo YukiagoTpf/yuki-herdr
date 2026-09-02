@@ -602,7 +602,8 @@ impl AppState {
 
                     if self.on_agent_panel_sort_toggle(mouse.column, mouse.row) {
                         self.agent_panel_sort = match self.agent_panel_sort {
-                            AgentPanelSort::Spaces => AgentPanelSort::Priority,
+                            AgentPanelSort::Spaces => AgentPanelSort::Tree,
+                            AgentPanelSort::Tree => AgentPanelSort::Priority,
                             AgentPanelSort::Priority => AgentPanelSort::Spaces,
                         };
                         self.agent_panel_scroll = 0;
@@ -626,11 +627,37 @@ impl AppState {
                         return None;
                     }
 
-                    if let Some((ws_idx, _tab_idx, pane_id)) =
-                        self.agent_detail_target_at(mouse.row)
-                    {
-                        self.mode = Mode::Terminal;
-                        return Some(MouseAction::FocusPane { ws_idx, pane_id });
+                    if let Some(target) = self.agent_detail_target_at(mouse.column, mouse.row) {
+                        match target {
+                            crate::ui::AgentPanelTarget::TreeNode(id) => {
+                                if !self.agent_panel_collapsed_nodes.remove(&id) {
+                                    self.agent_panel_collapsed_nodes.insert(id);
+                                }
+                                return None;
+                            }
+                            crate::ui::AgentPanelTarget::Workspace { ws_idx } => {
+                                self.mode = Mode::Terminal;
+                                return Some(MouseAction::FocusWorkspace { ws_idx });
+                            }
+                            crate::ui::AgentPanelTarget::Tab { ws_idx, tab_idx } => {
+                                let pane_id = self
+                                    .workspaces
+                                    .get(ws_idx)
+                                    .and_then(|workspace| workspace.tabs.get(tab_idx))
+                                    .map(|tab| tab.root_pane);
+                                if let Some(pane_id) = pane_id {
+                                    self.mode = Mode::Terminal;
+                                    return Some(MouseAction::FocusPane { ws_idx, pane_id });
+                                }
+                                return None;
+                            }
+                            crate::ui::AgentPanelTarget::Agent {
+                                ws_idx, pane_id, ..
+                            } => {
+                                self.mode = Mode::Terminal;
+                                return Some(MouseAction::FocusPane { ws_idx, pane_id });
+                            }
+                        }
                     }
                 } else if let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() {
                     if self.mode != Mode::Terminal {

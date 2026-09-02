@@ -1564,6 +1564,29 @@ impl AppState {
             return;
         }
 
+        if self.agent_panel_sort == crate::app::state::AgentPanelSort::Tree
+            && self.agent_view_override.is_none()
+        {
+            let entries = crate::ui::agent_panel_entries(self);
+            if let Some(entry) = entries.get(idx) {
+                if let Some(workspace) = self.workspaces.get(entry.ws_idx) {
+                    let workspace_id = workspace.id.clone();
+                    let tab_number = workspace.tabs.get(entry.tab_idx).map(|tab| tab.number);
+                    self.agent_panel_collapsed_nodes.remove(
+                        &crate::app::state::AgentPanelTreeNodeId::Workspace(workspace_id.clone()),
+                    );
+                    if let Some(tab_number) = tab_number {
+                        self.agent_panel_collapsed_nodes.remove(
+                            &crate::app::state::AgentPanelTreeNodeId::Tab {
+                                workspace_id,
+                                tab_number,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+
         let (_, detail_area) = crate::ui::expanded_sidebar_sections(
             self.view.sidebar_rect,
             self.sidebar_section_split,
@@ -4326,6 +4349,36 @@ mod tests {
         assert_eq!(state.active, Some(0));
         assert_eq!(state.workspaces[0].focused_pane_id(), Some(root));
         state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn focusing_tree_agent_expands_its_ancestors() {
+        let mut state = app_with_workspaces(&["one"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        mark_agent(&mut state, 0, 0, root);
+        state.agent_panel_sort = crate::app::state::AgentPanelSort::Tree;
+        let workspace_id = state.workspaces[0].id.clone();
+        let tab_number = state.workspaces[0].tabs[0].number;
+        state.agent_panel_collapsed_nodes.insert(
+            crate::app::state::AgentPanelTreeNodeId::Workspace(workspace_id.clone()),
+        );
+        state
+            .agent_panel_collapsed_nodes
+            .insert(crate::app::state::AgentPanelTreeNodeId::Tab {
+                workspace_id: workspace_id.clone(),
+                tab_number,
+            });
+
+        assert!(state.focus_agent_entry(0));
+        assert!(!state.agent_panel_collapsed_nodes.contains(
+            &crate::app::state::AgentPanelTreeNodeId::Workspace(workspace_id.clone())
+        ));
+        assert!(!state.agent_panel_collapsed_nodes.contains(
+            &crate::app::state::AgentPanelTreeNodeId::Tab {
+                workspace_id,
+                tab_number,
+            }
+        ));
     }
 
     #[test]

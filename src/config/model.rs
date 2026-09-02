@@ -98,6 +98,7 @@ pub enum AgentPanelSortConfig {
     #[default]
     #[serde(alias = "workspaces")]
     Spaces,
+    Tree,
     Priority,
 }
 
@@ -105,6 +106,7 @@ impl AgentPanelSortConfig {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Spaces => "spaces",
+            Self::Tree => "tree",
             Self::Priority => "priority",
         }
     }
@@ -898,7 +900,7 @@ pub struct UiConfig {
     /// Format for the outer terminal window title. Empty leaves the title alone.
     /// Default: "{hostname}: {workspace}".
     pub window_title: String,
-    /// Agent sidebar ordering. Saved values are "spaces" or "priority". Default: "spaces".
+    /// Agent sidebar ordering. Saved values are "spaces", "tree", or "priority". Default: "spaces".
     pub agent_panel_sort: AgentPanelSortConfig,
     /// Retired setting that Herdr wrote before the workspace filter was removed.
     #[serde(rename = "agent_panel_scope")]
@@ -1357,6 +1359,14 @@ agent_panel_sort = "priority"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.ui.agent_panel_sort, AgentPanelSortConfig::Priority);
+
+        let toml = r#"
+[ui]
+agent_panel_sort = "tree"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.ui.agent_panel_sort, AgentPanelSortConfig::Tree);
+        assert_eq!(AgentPanelSortConfig::Tree.as_str(), "tree");
 
         let toml = r#"
 [ui]

@@ -1073,7 +1073,17 @@ pub(crate) struct CopyModeSearchState {
 pub enum AgentPanelSort {
     #[default]
     Spaces,
+    Tree,
     Priority,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum AgentPanelTreeNodeId {
+    Workspace(String),
+    Tab {
+        workspace_id: String,
+        tab_number: usize,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -1529,6 +1539,8 @@ pub struct AppState {
     /// Ratio of sidebar height allocated to the workspaces section.
     pub sidebar_section_split: f32,
     pub agent_panel_sort: AgentPanelSort,
+    /// Transient presentation state for the expanded Agents tree.
+    pub(crate) agent_panel_collapsed_nodes: std::collections::HashSet<AgentPanelTreeNodeId>,
     pub status_indicators: crate::config::StatusIndicatorStyle,
     /// Transient session-wide projection override for the built-in Agents view.
     pub agent_view_override: Option<crate::api::schema::AgentViewSetParams>,
@@ -1924,6 +1936,7 @@ impl AppState {
             sidebar_collapsed_mode: crate::config::SidebarCollapsedModeConfig::Compact,
             sidebar_section_split: 0.5,
             agent_panel_sort: AgentPanelSort::Spaces,
+            agent_panel_collapsed_nodes: std::collections::HashSet::new(),
             status_indicators: crate::config::StatusIndicatorStyle::Dots,
             agent_view_override: None,
             sidebar_agents: crate::config::AgentsSidebarConfig::default(),

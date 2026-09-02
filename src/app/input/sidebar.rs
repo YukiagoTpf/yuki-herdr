@@ -484,8 +484,9 @@ impl AppState {
 
     pub(super) fn agent_detail_target_at(
         &self,
+        col: u16,
         row: u16,
-    ) -> Option<(usize, usize, crate::layout::PaneId)> {
+    ) -> Option<crate::ui::AgentPanelTarget> {
         if self.sidebar_collapsed {
             return None;
         }
@@ -502,19 +503,53 @@ impl AppState {
 
         let mut row_y = body.y;
         let body_bottom = body.y + body.height;
-        let entries = crate::ui::agent_panel_entries(self);
+        let rows = crate::ui::agent_panel_rows(self);
         let scroll = self.agent_panel_scroll.min(metrics.max_offset_from_bottom);
-        for (index, detail) in entries.iter().enumerate().skip(scroll) {
-            let height = crate::ui::agent_entry_height_in_body(self, detail, body.height);
+        for (index, display_row) in rows.iter().enumerate().skip(scroll) {
+            let height = crate::ui::agent_panel_row_height_in_body(self, display_row, body.height);
             if row_y.saturating_add(height) > body_bottom {
                 break;
             }
             if row >= row_y && row < row_y.saturating_add(height) {
-                return Some((detail.ws_idx, detail.tab_idx, detail.pane_id));
+                return match display_row {
+                    crate::ui::AgentPanelRow::TreeWorkspace { id, ws_idx, .. } => {
+                        Some(if col == body.x.saturating_add(1) {
+                            crate::ui::AgentPanelTarget::TreeNode(id.clone())
+                        } else {
+                            crate::ui::AgentPanelTarget::Workspace { ws_idx: *ws_idx }
+                        })
+                    }
+                    crate::ui::AgentPanelRow::TreeTab {
+                        id,
+                        ws_idx,
+                        tab_idx,
+                        ..
+                    } => Some(if col == body.x.saturating_add(3) {
+                        crate::ui::AgentPanelTarget::TreeNode(id.clone())
+                    } else {
+                        crate::ui::AgentPanelTarget::Tab {
+                            ws_idx: *ws_idx,
+                            tab_idx: *tab_idx,
+                        }
+                    }),
+                    crate::ui::AgentPanelRow::FlatAgent(detail)
+                    | crate::ui::AgentPanelRow::TreeAgent(detail) => {
+                        Some(crate::ui::AgentPanelTarget::Agent {
+                            ws_idx: detail.ws_idx,
+                            tab_idx: detail.tab_idx,
+                            pane_id: detail.pane_id,
+                        })
+                    }
+                };
             }
             row_y = row_y
                 .saturating_add(height)
-                .saturating_add(crate::ui::agent_entry_gap(self, index, entries.len()))
+                .saturating_add(crate::ui::agent_panel_row_gap(
+                    self,
+                    display_row,
+                    index,
+                    rows.len(),
+                ))
                 .min(body_bottom);
         }
         None
@@ -783,19 +818,31 @@ mod tests {
         );
 
         assert_eq!(
-            app.state.agent_detail_target_at(body.y),
-            Some((0, 0, first_pane))
+            app.state.agent_detail_target_at(body.x, body.y),
+            Some(crate::ui::AgentPanelTarget::Agent {
+                ws_idx: 0,
+                tab_idx: 0,
+                pane_id: first_pane,
+            })
         );
-        assert_eq!(app.state.agent_detail_target_at(body.y + 1), None);
+        assert_eq!(app.state.agent_detail_target_at(body.x, body.y + 1), None);
         assert_eq!(
-            app.state.agent_detail_target_at(body.y + 3),
-            Some((1, 0, second_pane))
+            app.state.agent_detail_target_at(body.x, body.y + 3),
+            Some(crate::ui::AgentPanelTarget::Agent {
+                ws_idx: 1,
+                tab_idx: 0,
+                pane_id: second_pane,
+            })
         );
 
         app.state.sidebar_agents.row_gap = 0;
         assert_eq!(
-            app.state.agent_detail_target_at(body.y + 1),
-            Some((1, 0, second_pane))
+            app.state.agent_detail_target_at(body.x, body.y + 1),
+            Some(crate::ui::AgentPanelTarget::Agent {
+                ws_idx: 1,
+                tab_idx: 0,
+                pane_id: second_pane,
+            })
         );
     }
 
@@ -838,13 +885,17 @@ mod tests {
         let body = crate::ui::agent_panel_body_rect(detail_area, false);
 
         assert_eq!(
-            app.state.agent_detail_target_at(body.y),
-            Some((0, 0, first_pane))
+            app.state.agent_detail_target_at(body.x, body.y),
+            Some(crate::ui::AgentPanelTarget::Agent {
+                ws_idx: 0,
+                tab_idx: 0,
+                pane_id: first_pane,
+            })
         );
     }
 
     #[test]
-    fn clicking_agent_panel_toggle_switches_sort() {
+    fn clicking_agent_panel_toggle_cycles_grouped_tree_and_priority() {
         let mut app = app_for_mouse_test();
         app.state.workspaces = vec![Workspace::test_new("test")];
         app.state.active = Some(0);
@@ -863,8 +914,113 @@ mod tests {
             toggle.y,
         ));
 
-        assert_eq!(app.state.agent_panel_sort, AgentPanelSort::Priority);
+        assert_eq!(app.state.agent_panel_sort, AgentPanelSort::Tree);
         assert_eq!(app.state.agent_panel_scroll, 0);
+
+        let toggle = crate::ui::agent_panel_toggle_rect(detail_area, app.state.agent_panel_sort);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            toggle.x,
+            toggle.y,
+        ));
+        assert_eq!(app.state.agent_panel_sort, AgentPanelSort::Priority);
+
+        let toggle = crate::ui::agent_panel_toggle_rect(detail_area, app.state.agent_panel_sort);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            toggle.x,
+            toggle.y,
+        ));
+        assert_eq!(app.state.agent_panel_sort, AgentPanelSort::Spaces);
+    }
+
+    #[test]
+    fn tree_agent_rows_toggle_groups_and_focus_leaf_panes() {
+        let mut app = app_for_mouse_test();
+        let mut workspace = Workspace::test_new("project");
+        let first_pane = workspace.tabs[0].root_pane;
+        let second_pane = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.agent_panel_sort = AgentPanelSort::Tree;
+
+        for pane_id in [first_pane, second_pane] {
+            let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .detected_agent = Some(Agent::Claude);
+        }
+
+        let detail_area = app.state.agent_panel_rect();
+        let body = crate::ui::agent_panel_body_rect(detail_area, false);
+        let workspace_node =
+            crate::app::state::AgentPanelTreeNodeId::Workspace(app.state.workspaces[0].id.clone());
+        let tab_node = crate::app::state::AgentPanelTreeNodeId::Tab {
+            workspace_id: app.state.workspaces[0].id.clone(),
+            tab_number: app.state.workspaces[0].tabs[0].number,
+        };
+
+        assert_eq!(
+            app.state.agent_detail_target_at(body.x + 2, body.y),
+            Some(crate::ui::AgentPanelTarget::Workspace { ws_idx: 0 })
+        );
+        assert_eq!(
+            app.state.agent_detail_target_at(body.x + 4, body.y + 1),
+            Some(crate::ui::AgentPanelTarget::Tab {
+                ws_idx: 0,
+                tab_idx: 0,
+            })
+        );
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            body.x + 1,
+            body.y,
+        ));
+        assert!(app
+            .state
+            .agent_panel_collapsed_nodes
+            .contains(&workspace_node));
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            body.x + 1,
+            body.y,
+        ));
+        assert!(!app
+            .state
+            .agent_panel_collapsed_nodes
+            .contains(&workspace_node));
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            body.x + 3,
+            body.y + 1,
+        ));
+        assert!(app.state.agent_panel_collapsed_nodes.contains(&tab_node));
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            body.x + 3,
+            body.y + 1,
+        ));
+        assert!(!app.state.agent_panel_collapsed_nodes.contains(&tab_node));
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            body.x + 6,
+            body.y + 3,
+        ));
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].layout.focused(),
+            second_pane
+        );
     }
 
     #[test]

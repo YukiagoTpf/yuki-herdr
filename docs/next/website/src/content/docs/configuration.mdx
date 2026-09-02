@@ -344,6 +344,19 @@ status_indicators = "symbols"
 
 The symbols are static, so this option does not enable spinner animation.
 
+### Agent panel ordering
+
+Click the ordering label beside **agents** to cycle through `grouped`, `tree`, and `priority`. The selected mode is saved to `ui.agent_panel_sort`. You can also configure it directly:
+
+```toml
+[ui]
+agent_panel_sort = "tree"
+```
+
+`grouped` keeps the compact Agent cards in workspace and tab order. `tree` renders a strict Workspace → Tab → Agent hierarchy, with one-line Agent leaves and rolled-up status on each Workspace and Tab. Click a chevron to collapse or expand its descendants; click a Workspace or Tab label to focus it. `priority` keeps a flat attention queue, ordered by blocked, unseen completion, working, idle, and unknown state.
+
+The tree includes only panes that appear in the Agents panel; ordinary shell panes do not create empty branches. Temporary Agent views set through the socket API keep their own flat filter and sort projection. Collapsed and mobile sidebars also keep their existing compact flat layout.
+
 ### Sidebar row layouts
 
 The expanded desktop sidebar renders each inner array in `rows` as one line. These are the complete default layouts:

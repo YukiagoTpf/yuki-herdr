@@ -12,7 +12,7 @@ use self::tokens::{ResolvedToken, ResolvedTokenKind, SpaceTokenContext};
 use super::scrollbar::{render_scrollbar, should_show_scrollbar};
 use super::status::{state_icon, state_label, state_label_color};
 use super::text::{display_width, display_width_u16, truncate_end};
-use crate::app::state::{AgentPanelSort, Palette};
+use crate::app::state::{AgentPanelSort, AgentPanelTreeNodeId, Palette};
 use crate::app::{AppState, Mode};
 use crate::detect::AgentState;
 use crate::terminal::TerminalRuntimeRegistry;
@@ -37,6 +37,45 @@ pub(crate) struct AgentPanelEntry {
     pub last_agent_state_change_seq: Option<u64>,
     pub state_labels: std::collections::HashMap<String, String>,
     pub tokens: std::collections::HashMap<String, String>,
+}
+
+pub(crate) enum AgentPanelRow {
+    FlatAgent(AgentPanelEntry),
+    TreeWorkspace {
+        id: AgentPanelTreeNodeId,
+        ws_idx: usize,
+        label: String,
+        state: AgentState,
+        seen: bool,
+        expanded: bool,
+    },
+    TreeTab {
+        id: AgentPanelTreeNodeId,
+        ws_idx: usize,
+        tab_idx: usize,
+        label: String,
+        state: AgentState,
+        seen: bool,
+        expanded: bool,
+    },
+    TreeAgent(AgentPanelEntry),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AgentPanelTarget {
+    TreeNode(AgentPanelTreeNodeId),
+    Workspace {
+        ws_idx: usize,
+    },
+    Tab {
+        ws_idx: usize,
+        tab_idx: usize,
+    },
+    Agent {
+        ws_idx: usize,
+        tab_idx: usize,
+        pane_id: crate::layout::PaneId,
+    },
 }
 
 fn sidebar_section_heights(total_h: u16, split_ratio: f32) -> (u16, u16) {
@@ -81,6 +120,7 @@ pub(crate) fn sidebar_section_divider_rect(area: Rect, split_ratio: f32) -> Rect
 fn agent_panel_sort_label(sort: AgentPanelSort) -> &'static str {
     match sort {
         AgentPanelSort::Spaces => "grouped",
+        AgentPanelSort::Tree => "tree",
         AgentPanelSort::Priority => "priority",
     }
 }
@@ -122,6 +162,134 @@ pub(crate) fn agent_panel_entries_from(
     terminal_runtimes: &TerminalRuntimeRegistry,
 ) -> Vec<AgentPanelEntry> {
     agent_panel_entries_with_runtimes(app, Some(terminal_runtimes))
+}
+
+pub(crate) fn agent_panel_rows(app: &AppState) -> Vec<AgentPanelRow> {
+    agent_panel_rows_with_runtimes(app, None)
+}
+
+fn agent_panel_rows_from(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+) -> Vec<AgentPanelRow> {
+    agent_panel_rows_with_runtimes(app, Some(terminal_runtimes))
+}
+
+fn agent_panel_rows_with_runtimes(
+    app: &AppState,
+    terminal_runtimes: Option<&TerminalRuntimeRegistry>,
+) -> Vec<AgentPanelRow> {
+    let entries = agent_panel_entries_with_runtimes(app, terminal_runtimes);
+    if app.agent_view_override.is_some() || app.agent_panel_sort != AgentPanelSort::Tree {
+        return entries.into_iter().map(AgentPanelRow::FlatAgent).collect();
+    }
+
+    agent_panel_tree_rows(app, entries)
+}
+
+fn agent_panel_tree_rows(app: &AppState, entries: Vec<AgentPanelEntry>) -> Vec<AgentPanelRow> {
+    let mut rows = Vec::with_capacity(entries.len().saturating_mul(3));
+    let mut current_workspace = None;
+    let mut current_tab = None;
+    let mut workspace_row = None;
+    let mut tab_row = None;
+    let mut workspace_expanded = false;
+    let mut tab_expanded = false;
+
+    for entry in entries {
+        if current_workspace != Some(entry.ws_idx) {
+            let Some(workspace) = app.workspaces.get(entry.ws_idx) else {
+                continue;
+            };
+            let id = AgentPanelTreeNodeId::Workspace(workspace.id.clone());
+            workspace_expanded = !app.agent_panel_collapsed_nodes.contains(&id);
+            rows.push(AgentPanelRow::TreeWorkspace {
+                id,
+                ws_idx: entry.ws_idx,
+                label: entry.primary_label.clone(),
+                state: entry.state,
+                seen: entry.seen,
+                expanded: workspace_expanded,
+            });
+            current_workspace = Some(entry.ws_idx);
+            current_tab = None;
+            workspace_row = Some(rows.len() - 1);
+            tab_row = None;
+        } else if let Some(row_idx) = workspace_row {
+            promote_agent_panel_group_state(&mut rows[row_idx], entry.state, entry.seen);
+        }
+
+        if !workspace_expanded {
+            continue;
+        }
+
+        if current_tab != Some(entry.tab_idx) {
+            let Some(workspace) = app.workspaces.get(entry.ws_idx) else {
+                continue;
+            };
+            let Some(tab) = workspace.tabs.get(entry.tab_idx) else {
+                continue;
+            };
+            let id = AgentPanelTreeNodeId::Tab {
+                workspace_id: workspace.id.clone(),
+                tab_number: tab.number,
+            };
+            tab_expanded = !app.agent_panel_collapsed_nodes.contains(&id);
+            rows.push(AgentPanelRow::TreeTab {
+                id,
+                ws_idx: entry.ws_idx,
+                tab_idx: entry.tab_idx,
+                label: workspace
+                    .tab_display_name(entry.tab_idx)
+                    .unwrap_or_else(|| (entry.tab_idx + 1).to_string()),
+                state: entry.state,
+                seen: entry.seen,
+                expanded: tab_expanded,
+            });
+            current_tab = Some(entry.tab_idx);
+            tab_row = Some(rows.len() - 1);
+        } else if let Some(row_idx) = tab_row {
+            promote_agent_panel_group_state(&mut rows[row_idx], entry.state, entry.seen);
+        }
+
+        if tab_expanded {
+            rows.push(AgentPanelRow::TreeAgent(entry));
+        }
+    }
+
+    rows
+}
+
+fn promote_agent_panel_group_state(row: &mut AgentPanelRow, state: AgentState, seen: bool) {
+    let (current_state, current_seen) = match row {
+        AgentPanelRow::TreeWorkspace {
+            state: current_state,
+            seen: current_seen,
+            ..
+        }
+        | AgentPanelRow::TreeTab {
+            state: current_state,
+            seen: current_seen,
+            ..
+        } => (current_state, current_seen),
+        AgentPanelRow::FlatAgent(_) | AgentPanelRow::TreeAgent(_) => return,
+    };
+    if agent_attention_priority(state, seen)
+        > agent_attention_priority(*current_state, *current_seen)
+    {
+        *current_state = state;
+        *current_seen = seen;
+    }
+}
+
+fn agent_attention_priority(state: AgentState, seen: bool) -> u8 {
+    match (state, seen) {
+        (AgentState::Blocked, _) => 4,
+        (AgentState::Idle, false) => 3,
+        (AgentState::Working, _) => 2,
+        (AgentState::Idle, true) => 1,
+        (AgentState::Unknown, _) => 0,
+    }
 }
 
 fn agent_panel_entries_with_runtimes(
@@ -571,6 +739,32 @@ pub(crate) fn agent_entry_gap(app: &AppState, entry_idx: usize, entry_count: usi
     }
 }
 
+pub(crate) fn agent_panel_row_height_in_body(
+    app: &AppState,
+    row: &AgentPanelRow,
+    body_height: u16,
+) -> u16 {
+    match row {
+        AgentPanelRow::FlatAgent(entry) => agent_entry_height_in_body(app, entry, body_height),
+        AgentPanelRow::TreeWorkspace { .. }
+        | AgentPanelRow::TreeTab { .. }
+        | AgentPanelRow::TreeAgent(_) => 1.min(body_height),
+    }
+}
+
+pub(crate) fn agent_panel_row_gap(
+    app: &AppState,
+    row: &AgentPanelRow,
+    row_idx: usize,
+    row_count: usize,
+) -> u16 {
+    if matches!(row, AgentPanelRow::FlatAgent(_)) {
+        agent_entry_gap(app, row_idx, row_count)
+    } else {
+        0
+    }
+}
+
 fn agent_panel_visible_count_from(app: &AppState, area: Rect, scroll: usize) -> usize {
     let body = agent_panel_body_rect(area, false);
     if body.width == 0 || body.height == 0 {
@@ -579,16 +773,16 @@ fn agent_panel_visible_count_from(app: &AppState, area: Rect, scroll: usize) -> 
 
     let mut used_rows = 0u16;
     let mut visible = 0usize;
-    let entries = agent_panel_entries(app);
-    for (index, entry) in entries.iter().enumerate().skip(scroll) {
-        let height = agent_entry_height_in_body(app, entry, body.height);
+    let rows = agent_panel_rows(app);
+    for (index, row) in rows.iter().enumerate().skip(scroll) {
+        let height = agent_panel_row_height_in_body(app, row, body.height);
         if used_rows.saturating_add(height) > body.height {
             break;
         }
         used_rows = used_rows.saturating_add(height);
         visible += 1;
         used_rows = used_rows
-            .saturating_add(agent_entry_gap(app, index, entries.len()))
+            .saturating_add(agent_panel_row_gap(app, row, index, rows.len()))
             .min(body.height);
     }
     visible
@@ -596,19 +790,19 @@ fn agent_panel_visible_count_from(app: &AppState, area: Rect, scroll: usize) -> 
 
 fn agent_panel_bottom_start(app: &AppState, area: Rect) -> usize {
     let body = agent_panel_body_rect(area, false);
-    let entries = agent_panel_entries(app);
+    let rows = agent_panel_rows(app);
     let mut used_rows = 0u16;
-    let mut start = entries.len();
-    for (index, entry) in entries.iter().enumerate().rev() {
-        let gap = agent_entry_gap(app, index, entries.len());
-        let needed = agent_entry_height_in_body(app, entry, body.height).saturating_add(gap);
+    let mut start = rows.len();
+    for (index, row) in rows.iter().enumerate().rev() {
+        let gap = agent_panel_row_gap(app, row, index, rows.len());
+        let needed = agent_panel_row_height_in_body(app, row, body.height).saturating_add(gap);
         if used_rows.saturating_add(needed) > body.height {
             break;
         }
         used_rows = used_rows.saturating_add(needed);
         start = index;
     }
-    start.min(entries.len().saturating_sub(1))
+    start.min(rows.len().saturating_sub(1))
 }
 
 pub(crate) fn agent_panel_scroll_for_target(
@@ -617,6 +811,19 @@ pub(crate) fn agent_panel_scroll_for_target(
     current_scroll: usize,
     target: usize,
 ) -> usize {
+    let target = agent_panel_entries(app).get(target).and_then(|target| {
+        agent_panel_rows(app).iter().position(|row| match row {
+            AgentPanelRow::FlatAgent(entry) | AgentPanelRow::TreeAgent(entry) => {
+                entry.ws_idx == target.ws_idx
+                    && entry.tab_idx == target.tab_idx
+                    && entry.pane_id == target.pane_id
+            }
+            AgentPanelRow::TreeWorkspace { .. } | AgentPanelRow::TreeTab { .. } => false,
+        })
+    });
+    let Some(target) = target else {
+        return current_scroll.min(agent_panel_bottom_start(app, area));
+    };
     let max_scroll = agent_panel_bottom_start(app, area);
     if target < current_scroll {
         return target.min(max_scroll);
@@ -1473,14 +1680,14 @@ fn render_agent_detail(
         );
     }
 
-    let details = agent_panel_entries_from(app, terminal_runtimes);
+    let rows = agent_panel_rows_from(app, terminal_runtimes);
     let metrics = agent_panel_scroll_metrics(app, area);
     let scrollbar_rect = agent_panel_scrollbar_rect(app, area);
     let body = agent_panel_body_rect(area, should_show_scrollbar(metrics));
     if body == Rect::default() {
         return;
     }
-    if details.is_empty() && app.agent_view_override.is_some() {
+    if rows.is_empty() && app.agent_view_override.is_some() {
         frame.render_widget(
             Paragraph::new(" no matching agents")
                 .style(Style::default().fg(p.overlay0).add_modifier(Modifier::DIM)),
@@ -1492,60 +1699,215 @@ fn render_agent_detail(
     let scroll = app.agent_panel_scroll.min(metrics.max_offset_from_bottom);
     let mut row_y = body.y;
     let body_bottom = body.y + body.height;
-    for (index, detail) in details.iter().enumerate().skip(scroll) {
-        let label_color = state_label_color(detail.state, detail.seen, p);
-        let rows = resolved_agent_rows(app, detail);
-        let height = (rows.len().max(1) as u16).min(body.height);
+    for (index, display_row) in rows.iter().enumerate().skip(scroll) {
+        let height = agent_panel_row_height_in_body(app, display_row, body.height);
         if row_y.saturating_add(height) > body_bottom {
             break;
         }
 
-        let is_active = app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id);
-        let row_style = if is_active {
-            Style::default().bg(p.active_row_bg)
-        } else {
-            Style::default()
-        };
-        let name_style = if is_active {
-            Style::default().fg(p.text).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD)
-        };
-        let status_style = if is_active {
-            Style::default().fg(label_color)
-        } else {
-            Style::default().fg(label_color).add_modifier(Modifier::DIM)
-        };
-        let agent_style = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
-        let state_icon = state_icon(detail.state, detail.seen, app.status_indicators, p);
-
-        for (row_index, resolved) in rows.iter().take(height as usize).enumerate() {
-            let mut spans = vec![Span::raw(if row_index == 0 { " " } else { "   " })];
-            spans.extend(resolved_token_spans(
-                resolved,
-                state_icon,
-                status_style,
-                name_style,
-                agent_style,
-                agent_style,
-                p,
-                body.width
-                    .saturating_sub(if row_index == 0 { 1 } else { 3 }) as usize,
-            ));
-            frame.render_widget(
-                Paragraph::new(Line::from(spans)).style(row_style),
-                Rect::new(body.x, row_y + row_index as u16, body.width, 1),
-            );
+        match display_row {
+            AgentPanelRow::FlatAgent(detail) => {
+                render_flat_agent_row(app, frame, body, row_y, detail, height);
+            }
+            AgentPanelRow::TreeWorkspace {
+                ws_idx,
+                label,
+                state,
+                seen,
+                expanded,
+                ..
+            } => render_agent_tree_group_row(
+                app,
+                frame,
+                body,
+                row_y,
+                label,
+                *state,
+                *seen,
+                *expanded,
+                1,
+                true,
+                !*expanded && app.active == Some(*ws_idx),
+            ),
+            AgentPanelRow::TreeTab {
+                ws_idx,
+                tab_idx,
+                label,
+                state,
+                seen,
+                expanded,
+                ..
+            } => render_agent_tree_group_row(
+                app,
+                frame,
+                body,
+                row_y,
+                label,
+                *state,
+                *seen,
+                *expanded,
+                3,
+                false,
+                !*expanded
+                    && app.active == Some(*ws_idx)
+                    && app
+                        .workspaces
+                        .get(*ws_idx)
+                        .is_some_and(|workspace| workspace.active_tab == *tab_idx),
+            ),
+            AgentPanelRow::TreeAgent(detail) => {
+                render_agent_tree_leaf_row(app, frame, body, row_y, detail);
+            }
         }
         row_y = row_y
             .saturating_add(height)
-            .saturating_add(agent_entry_gap(app, index, details.len()))
+            .saturating_add(agent_panel_row_gap(app, display_row, index, rows.len()))
             .min(body_bottom);
     }
 
     if let Some(track) = scrollbar_rect {
         render_scrollbar(frame, metrics, track, p.surface_dim, p.overlay0, "▕");
     }
+}
+
+fn render_flat_agent_row(
+    app: &AppState,
+    frame: &mut Frame,
+    body: Rect,
+    row_y: u16,
+    detail: &AgentPanelEntry,
+    height: u16,
+) {
+    let p = &app.palette;
+    let label_color = state_label_color(detail.state, detail.seen, p);
+    let rows = resolved_agent_rows(app, detail);
+    let is_active = app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id);
+    let row_style = if is_active {
+        Style::default().bg(p.active_row_bg)
+    } else {
+        Style::default()
+    };
+    let name_style = if is_active {
+        Style::default().fg(p.text).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD)
+    };
+    let status_style = if is_active {
+        Style::default().fg(label_color)
+    } else {
+        Style::default().fg(label_color).add_modifier(Modifier::DIM)
+    };
+    let agent_style = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
+    let state_icon = state_icon(detail.state, detail.seen, app.status_indicators, p);
+
+    for (row_index, resolved) in rows.iter().take(height as usize).enumerate() {
+        let mut spans = vec![Span::raw(if row_index == 0 { " " } else { "   " })];
+        spans.extend(resolved_token_spans(
+            resolved,
+            state_icon,
+            status_style,
+            name_style,
+            agent_style,
+            agent_style,
+            p,
+            body.width
+                .saturating_sub(if row_index == 0 { 1 } else { 3 }) as usize,
+        ));
+        frame.render_widget(
+            Paragraph::new(Line::from(spans)).style(row_style),
+            Rect::new(body.x, row_y + row_index as u16, body.width, 1),
+        );
+    }
+}
+
+// Keeping resolved geometry and row facts explicit makes the renderer stateless.
+#[allow(clippy::too_many_arguments)]
+fn render_agent_tree_group_row(
+    app: &AppState,
+    frame: &mut Frame,
+    body: Rect,
+    row_y: u16,
+    label: &str,
+    state: AgentState,
+    seen: bool,
+    expanded: bool,
+    indent: u16,
+    bold: bool,
+    active: bool,
+) {
+    let p = &app.palette;
+    let (icon, icon_style) = state_icon(state, seen, app.status_indicators, p);
+    let prefix = format!(
+        "{}{} ",
+        " ".repeat(indent as usize),
+        if expanded { "▾" } else { "▸" }
+    );
+    let reserved = display_width(&prefix)
+        .saturating_add(display_width(icon))
+        .saturating_add(1);
+    let label = truncate_end(label, (body.width as usize).saturating_sub(reserved));
+    let mut label_style = Style::default().fg(if active {
+        p.text
+    } else if bold {
+        p.subtext0
+    } else {
+        p.overlay0
+    });
+    if bold {
+        label_style = label_style.add_modifier(Modifier::BOLD);
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(prefix, Style::default().fg(p.overlay0)),
+            Span::styled(icon, icon_style),
+            Span::raw(" "),
+            Span::styled(label, label_style),
+        ]))
+        .style(if active {
+            Style::default().bg(p.active_row_bg)
+        } else {
+            Style::default()
+        }),
+        Rect::new(body.x, row_y, body.width, 1),
+    );
+}
+
+fn render_agent_tree_leaf_row(
+    app: &AppState,
+    frame: &mut Frame,
+    body: Rect,
+    row_y: u16,
+    detail: &AgentPanelEntry,
+) {
+    let p = &app.palette;
+    let is_active = app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id);
+    let row_style = if is_active {
+        Style::default().bg(p.active_row_bg)
+    } else {
+        Style::default()
+    };
+    let label_style = Style::default()
+        .fg(if is_active { p.text } else { p.subtext0 })
+        .add_modifier(Modifier::BOLD);
+    let (icon, icon_style) = state_icon(detail.state, detail.seen, app.status_indicators, p);
+    let prefix = "     ";
+    let reserved = display_width(prefix)
+        .saturating_add(display_width(icon))
+        .saturating_add(1);
+    let label = truncate_end(
+        detail.agent_label.as_deref().unwrap_or("agent"),
+        (body.width as usize).saturating_sub(reserved),
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::raw(prefix),
+            Span::styled(icon, icon_style),
+            Span::raw(" "),
+            Span::styled(label, label_style),
+        ]))
+        .style(row_style),
+        Rect::new(body.x, row_y, body.width, 1),
+    );
 }
 
 pub(crate) fn collapsed_sidebar_toggle_rect(area: Rect) -> Rect {
@@ -2230,6 +2592,176 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 ("multi", Some("logs")),
             ]
         );
+    }
+
+    #[test]
+    fn tree_agent_panel_projects_workspace_tab_and_agent_rows() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut workspace = Workspace::test_new("project");
+        let first_pane = workspace.tabs[0].root_pane;
+        let second_pane = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        let logs_tab = workspace.test_add_tab(Some("logs"));
+        let logs_pane = workspace.tabs[logs_tab].root_pane;
+        app.workspaces = vec![workspace, Workspace::test_new("shell-only")];
+        app.ensure_test_terminals();
+        app.agent_panel_sort = crate::app::state::AgentPanelSort::Tree;
+
+        for (pane_id, agent) in [
+            (first_pane, Agent::Claude),
+            (second_pane, Agent::Codex),
+            (logs_pane, Agent::Pi),
+        ] {
+            let terminal_id = app.workspaces[0]
+                .tabs
+                .iter()
+                .find_map(|tab| tab.panes.get(&pane_id))
+                .map(|pane| pane.attached_terminal_id.clone())
+                .unwrap();
+            app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(agent);
+        }
+
+        let rows = agent_panel_rows(&app);
+        assert_eq!(rows.len(), 6);
+        assert!(matches!(
+            &rows[0],
+            AgentPanelRow::TreeWorkspace { label, .. } if label == "project"
+        ));
+        assert!(matches!(
+            &rows[1],
+            AgentPanelRow::TreeTab { label, .. } if label == "1"
+        ));
+        assert!(matches!(&rows[2], AgentPanelRow::TreeAgent(entry) if entry.pane_id == first_pane));
+        assert!(
+            matches!(&rows[3], AgentPanelRow::TreeAgent(entry) if entry.pane_id == second_pane)
+        );
+        assert!(matches!(
+            &rows[4],
+            AgentPanelRow::TreeTab { label, .. } if label == "logs"
+        ));
+        assert!(matches!(&rows[5], AgentPanelRow::TreeAgent(entry) if entry.pane_id == logs_pane));
+        assert!(rows.iter().all(|row| !matches!(
+            row,
+            AgentPanelRow::TreeWorkspace { label, .. } if label == "shell-only"
+        )));
+    }
+
+    #[test]
+    fn tree_agent_panel_collapses_stable_nodes_and_rolls_up_attention() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut workspace = Workspace::test_new("project");
+        let first_pane = workspace.tabs[0].root_pane;
+        let second_pane = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        app.agent_panel_sort = crate::app::state::AgentPanelSort::Tree;
+
+        for (pane_id, state) in [
+            (first_pane, AgentState::Working),
+            (second_pane, AgentState::Blocked),
+        ] {
+            let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+            terminal.detected_agent = Some(Agent::Claude);
+            terminal.state = state;
+        }
+
+        let workspace_id = app.workspaces[0].id.clone();
+        let tab_number = app.workspaces[0].tabs[0].number;
+        app.agent_panel_collapsed_nodes
+            .insert(crate::app::state::AgentPanelTreeNodeId::Tab {
+                workspace_id: workspace_id.clone(),
+                tab_number,
+            });
+        let rows = agent_panel_rows(&app);
+        assert_eq!(rows.len(), 2);
+        assert!(matches!(
+            &rows[0],
+            AgentPanelRow::TreeWorkspace {
+                state: AgentState::Blocked,
+                expanded: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &rows[1],
+            AgentPanelRow::TreeTab {
+                state: AgentState::Blocked,
+                expanded: false,
+                ..
+            }
+        ));
+
+        app.agent_panel_collapsed_nodes
+            .insert(crate::app::state::AgentPanelTreeNodeId::Workspace(
+                workspace_id,
+            ));
+        let rows = agent_panel_rows(&app);
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(
+            &rows[0],
+            AgentPanelRow::TreeWorkspace {
+                state: AgentState::Blocked,
+                expanded: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn custom_agent_view_remains_flat_when_tree_is_configured() {
+        let mut app = crate::app::state::AppState::test_new();
+        let workspace = Workspace::test_new("project");
+        let pane_id = workspace.tabs[0].root_pane;
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(Agent::Claude);
+        app.agent_panel_sort = crate::app::state::AgentPanelSort::Tree;
+        app.agent_view_override = Some(crate::api::schema::AgentViewSetParams {
+            source: "test.tree".into(),
+            label: Some("test".into()),
+            filter: None,
+            sort: Vec::new(),
+        });
+
+        let rows = agent_panel_rows(&app);
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(&rows[0], AgentPanelRow::FlatAgent(entry) if entry.pane_id == pane_id));
+    }
+
+    #[test]
+    fn tree_agent_panel_renders_compact_hierarchy_without_repeated_workspace() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut workspace = Workspace::test_new("project");
+        workspace.tabs[0].set_custom_name("focus".into());
+        let pane_id = workspace.tabs[0].root_pane;
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(Agent::Claude);
+        app.agent_panel_sort = crate::app::state::AgentPanelSort::Tree;
+
+        let area = Rect::new(0, 0, 28, 10);
+        let body = agent_panel_body_rect(area, false);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_agent_detail(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let workspace_row = row_text(buffer, body.y, body.width);
+        let tab_row = row_text(buffer, body.y + 1, body.width);
+        let agent_row = row_text(buffer, body.y + 2, body.width);
+
+        assert!(workspace_row.contains('▾') && workspace_row.contains("project"));
+        assert!(tab_row.contains('▾') && tab_row.contains("focus"));
+        assert!(agent_row.contains("claude"));
+        assert!(!agent_row.contains("project"));
     }
 
     #[test]

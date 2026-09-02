@@ -110,6 +110,9 @@ impl App {
             crate::app::state::AgentPanelSort::Spaces => {
                 crate::config::AgentPanelSortConfig::Spaces.as_str()
             }
+            crate::app::state::AgentPanelSort::Tree => {
+                crate::config::AgentPanelSortConfig::Tree.as_str()
+            }
             crate::app::state::AgentPanelSort::Priority => {
                 crate::config::AgentPanelSortConfig::Priority.as_str()
             }

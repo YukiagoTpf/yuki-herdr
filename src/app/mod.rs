@@ -255,6 +255,7 @@ fn agent_panel_sort_from_config(
 ) -> state::AgentPanelSort {
     match sort {
         crate::config::AgentPanelSortConfig::Spaces => state::AgentPanelSort::Spaces,
+        crate::config::AgentPanelSortConfig::Tree => state::AgentPanelSort::Tree,
         crate::config::AgentPanelSortConfig::Priority => state::AgentPanelSort::Priority,
     }
 }
@@ -650,6 +651,7 @@ impl App {
             sidebar_collapsed_mode: config.ui.sidebar_collapsed_mode,
             sidebar_section_split,
             agent_panel_sort,
+            agent_panel_collapsed_nodes: std::collections::HashSet::new(),
             status_indicators: config.ui.status_indicators,
             agent_view_override: None,
             sidebar_agents: config.ui.sidebar.agents.clone(),
@@ -2762,12 +2764,12 @@ mod tests {
     #[test]
     fn startup_uses_configured_agent_panel_sort() {
         let mut config = Config::default();
-        config.ui.agent_panel_sort = crate::config::AgentPanelSortConfig::Priority;
+        config.ui.agent_panel_sort = crate::config::AgentPanelSortConfig::Tree;
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
 
         let app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
 
-        assert_eq!(app.state.agent_panel_sort, state::AgentPanelSort::Priority);
+        assert_eq!(app.state.agent_panel_sort, state::AgentPanelSort::Tree);
     }
 
     #[test]
@@ -3690,11 +3692,11 @@ mod tests {
         let mut app = test_app();
         assert_eq!(app.state.agent_panel_sort, state::AgentPanelSort::Spaces);
 
-        app.save_agent_panel_sort(state::AgentPanelSort::Priority);
+        app.save_agent_panel_sort(state::AgentPanelSort::Tree);
 
-        assert_eq!(app.state.agent_panel_sort, state::AgentPanelSort::Priority);
+        assert_eq!(app.state.agent_panel_sort, state::AgentPanelSort::Tree);
         let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains("agent_panel_sort = \"priority\""));
+        assert!(content.contains("agent_panel_sort = \"tree\""));
         assert!(app.state.config_diagnostic.is_none());
 
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
